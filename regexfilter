@@ -8,7 +8,7 @@ and prints the record to the first output file whose filter pattern matches.
 
 any records which don't match any pattern are by default written to stdout.
 optionally, a "remainder" file may be instead specified,
-or the remainder output can be dropped using "rem discard".
+or the remainder output can be dropped using "remainder discard".
 ]]
 -- dependencies: lrexlib_posix
 m_rexlib = require("rex_posix")
