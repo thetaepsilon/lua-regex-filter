@@ -1,0 +1,4 @@
+rule testscript
+  command = ./$in > $out
+
+build gen/testok: testscript test.sh

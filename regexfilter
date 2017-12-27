@@ -1,0 +1,304 @@
+#!/usr/bin/env lua51rocks
+
+--[[
+regexfilter
+given stdin, a set of filter patterns and matching output filenames,
+this program runs over all records in stdin (by default, newline-separated),
+and prints the record to the first output file whose filter pattern matches.
+
+any records which don't match any pattern are by default written to stdout.
+optionally, a "remainder" file may be instead specified,
+or the remainder output can be dropped using "rem discard".
+]]
+-- dependencies: lrexlib_posix
+m_rexlib = require("rex_posix")
+
+
+
+local argv0 = arg[0] or "regexfilter"
+local usage = function(out)
+	out:write("Usage:\n")
+	out:write(argv0)
+	out:write(" [{remainder | r} {file filename | discard}]")
+	out:write(" [{infile | i} filename]")
+	out:write(" {match | m} pat1 file1 [[match pat2 file2] ...]")
+	out:write("\n")
+	out:write("patterns may need escaping or quoting for your shell.\n")
+end
+
+
+
+-- takes an argv token from an array or returns nil if no entries remain.
+local nexttoken = function(self)
+	local consumed = self.consumed
+	if consumed < self.length then
+		local c = consumed + 1
+		self.consumed = c
+		return self.argv[c]
+	end
+	return nil
+end
+local iterator = function(self)
+	return function() return self:next() end
+end
+local newtokenset = function(argv)
+	return {
+		next = nexttoken,
+		argv = argv,
+		consumed = 0,
+		length = #argv,
+		iterator = iterator,
+	}
+end
+
+
+
+-- print out a filename for easy display on the terminal.
+-- takes care of obscure path characters.
+local fquote = function(path)
+	return string.format("%q", path)
+end
+
+
+
+-- handler for the "match" option.
+-- takes two tokens, the pattern and the file name.
+local msg_missing = "match option is missing argument "
+local handler_opt_match = function(cfg, opt, tokenset, errprint)
+	-- set up the filters list on first match option.
+	-- if the list doesn't exist it will trigger an error later.
+	local list = cfg.filters
+	if not list then
+		list = {}
+		cfg.filters = list
+	end
+	local tcount = #list + 1
+
+	local missing 
+	local pattern = tokenset:next()
+	if not pattern then
+		errprint(msg_missing.."filter pattern")
+		return false
+	end
+	local filename = tokenset:next()
+	if not filename then
+		errprint(msg_missing.."target filename")
+		return false
+	end
+
+	-- try to compile the regex and open the associated file.
+	local ok, compresult = pcall(m_rexlib.new, pattern)
+	if not ok then
+		local msg = "compilation of pattern " ..
+			tcount .. " " .. string.format("%q", pattern) ..
+			" failed: " .. compresult
+		errprint(msg)
+		return false
+	end
+	-- note that this is relying on program exit to close files.
+	local file, msg = io.open(filename, "w")
+	if not file then
+		local msg = "opening file for pattern " .. tcount ..
+			" (" .. fquote(filename) ..
+			") for writing failed: " .. msg
+		errprint(msg)
+		return false
+	end
+
+	-- now save the entry for later.
+	list[tcount] = {
+		pattern=compresult,
+		decompiled=pattern,
+		file=file
+	}
+	return true
+end
+
+
+
+-- handle the infile option: attempt to open input file
+local handler_opt_infile = function(cfg, opt, tokenset, errprint)
+	-- duplicates of this option are not allowed.
+	if cfg.input ~= nil then
+		errprint("only one infile can be specified.")
+		return false
+	end
+
+	local filename = tokenset:next()
+	if not filename then
+		errprint("infile option was missing it's filename argument.")
+		return false
+	end
+	local infile, msg = io.open(filename, "r")
+	if not infile then
+		local msg = "unable to open specified input file " ..
+			fquote(filename) .. " for reading: " .. msg
+		errprint(msg)
+		return false
+	end
+
+	cfg.input = infile
+	return true
+end
+
+
+
+
+
+-- handle the "rem" option.
+-- arguments are either "file $filename" or "discard".
+-- "discard" is distinguished from no file set by setting the field false;
+-- this informs the defaults function later that this is intentional.
+local msg_missing = "remainder file option was missing argument "
+local handler_opt_remainder = function(cfg, opt, tokenset, errprint)
+	if cfg.remainder ~= nil then
+		errprint("only one remainder destination can be specified.")
+		return false
+	end
+	
+	local rfile
+	local result = false
+	-- look at the next token to determine if it's a file or discard.
+	local mode = tokenset:next()
+	if not mode then
+		errprint(msg_missing .. "file or discard")
+	end
+	if mode == "file" then
+		local filename = tokenset:next()
+		if not filename then
+			-- FIXME: DRY violation, abstract this pattern!
+			errprint(msg_missing .. "target filename")
+		else
+			local file, msg = io.open(filename, "w")
+			if not file then
+				msg = "unable to open remainder file " ..
+					fquote(filename) ..
+					" for writing: " .. msg
+				errprint(msg)
+			else
+				rfile = file
+				result = true
+			end
+		end
+	elseif mode == "discard" then
+		rfile = false
+		result = true
+	end
+	-- fall through to default of a false result if neithet matches.
+
+	cfg.remainder = rfile
+	return result
+end
+
+
+
+
+
+-- allow passing both short names and long names.
+local handlers = {
+	match = handler_opt_match,
+	m = handler_opt_match,
+	infile = handler_opt_infile,
+	i = handler_opt_infile,
+	remainder = handler_opt_remainder,
+	r = handler_opt_remainder,
+}
+local parseargv = function(tokenset, errprint)
+	local cfg = {}
+
+	-- look at the next available option,
+	-- and let the handlers take subsequent tokens as appropriate.
+	for opt in tokenset:iterator() do
+		local handler = handlers[opt]
+		if handler then
+			if not handler(cfg, opt, tokenset, errprint) then
+				msg = "parsing of option " ..
+					opt .. " failed."
+				errprint(msg)
+				return nil
+			end
+		else
+			errprint(argv0..": unrecognised option "..opt)
+			return nil
+		end
+	end
+
+	return cfg
+end
+
+
+
+--apply default configuration for options not specified.
+local apply_defaults = function(cfg, errprint)
+	-- there needs to be at least one filter to be useful.
+	if not cfg.filters then
+		errprint("at least one filter needs to be specified.")
+		return false
+	end
+
+	if not cfg.input then
+		cfg.input = io.stdin
+	end
+	-- remember, false means "discard remainder"
+	if cfg.remainder == nil then
+		cfg.remainder = io.stdout
+	end
+	return true
+end
+
+
+
+
+
+-- actual filter routine.
+-- try each filter in turn to see if it matches;
+-- if so, write it to that file, else to the remainder file.
+local process = function(cfg, errprint)
+	for record in cfg.input:lines() do
+		-- re-add the newline as we're using low-level write().
+		local buf = record .. "\n"
+		local found = nil
+
+		for _, filter in ipairs(cfg.filters) do
+			if filter.pattern:exec(record) then
+				found = filter.file
+				break
+			end
+		end
+		if not found then found = cfg.remainder end
+
+		if found then found:write(buf) end
+	end
+	return true
+end
+
+
+
+
+
+-- convienience print wrapper to stderr for logging
+local mkprint = function(iostream)
+	return function(msg)
+		iostream:write(msg)
+		iostream:write("\n")
+	end
+end
+
+local msg_baddefault =
+	"one or more non-defaultable options were not specified."
+local main = function(argv, stdin, stdout, stderr)
+	errprint = mkprint(stderr)
+	local tokenset = newtokenset(argv)
+	local cfg = parseargv(tokenset, errprint)
+	if cfg == nil then
+		usage(stderr)
+		error("execution halted due to argv parse errors.")
+	end
+	local ok = apply_defaults(cfg)
+	if not ok then
+		error(msg_baddefault)
+	end
+	process(cfg, errprint)
+end
+
+main(arg, io.stdin, io.stdout, io.stderr)
