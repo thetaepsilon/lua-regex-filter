@@ -288,6 +288,13 @@ local msg_baddefault =
 	"one or more non-defaultable options were not specified."
 local main = function(argv, stdin, stdout, stderr)
 	errprint = mkprint(stderr)
+
+	-- exit early if no arguments were passed.
+	if #argv < 1 then
+		usage(stderr)
+		error("no arguments specified!")
+	end
+
 	local tokenset = newtokenset(argv)
 	local cfg = parseargv(tokenset, errprint)
 	if cfg == nil then
