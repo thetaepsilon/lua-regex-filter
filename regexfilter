@@ -294,7 +294,7 @@ local main = function(argv, stdin, stdout, stderr)
 		usage(stderr)
 		error("execution halted due to argv parse errors.")
 	end
-	local ok = apply_defaults(cfg)
+	local ok = apply_defaults(cfg, errprint)
 	if not ok then
 		error(msg_baddefault)
 	end
